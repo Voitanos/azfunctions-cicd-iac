@@ -1,0 +1,31 @@
+{
+  "name": "azfunctions-cicd-iac",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc --project ./tsconfig.json",
+    "build:watch": "tsc -w",
+    "clean": "run-p clean:*",
+    "clean:build": "rm -rf dist && rm -rf temp",
+    "clean:build-config": "find ./config -maxdepth 2 -regex '.*\\.js' | xargs rm",
+    "prep": "tsc --project ./tsconfig.json",
+    "prestart": "npm run build",
+    "start": "run-p build:watch start:func",
+    "start:func": "func start",
+    "test": "jest --passWithNoTests"
+  },
+  "dependencies": {
+    "@azure/app-configuration": "1.4.1",
+    "@azure/identity": "3.3.2",
+    "applicationinsights": "2.9.0"
+  },
+  "devDependencies": {
+    "@azure/functions": "3.0.0",
+    "@types/jest": "29.5.6",
+    "@types/node": "14.17.25",
+    "jest": "29.7.0",
+    "npm-run-all": "4.1.5",
+    "stub-azure-function-context": "2.4.1",
+    "ts-jest": "29.1.1",
+    "typescript": "5.2.2"
+  }
+}

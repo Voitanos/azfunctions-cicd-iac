@@ -1,0 +1,17 @@
+.git*
+.vscode
+
+*.js.map
+*.ts
+
+config/jest.config.*
+*.spec.*
+**/__mocks__/**/*.*
+wallaby.config.js
+
+**/docs
+*.md
+
+local.settings.json
+temp
+tsconfig.json

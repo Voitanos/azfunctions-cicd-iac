@@ -1,0 +1,300 @@
+######################################################################
+# Build, test & deploy the Azure Function app on pushes to master.
+######################################################################
+name: Staging build, test & deploy app
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - master
+  #     - development
+  #   paths-ignore:
+  #     - '**/**.md'
+
+env:
+  NODE_VERSION: '18.x'
+
+  # all Azure Functions are at the root of the project
+  AZURE_FUNCTION_APP_PACKAGE_PATH: ''
+
+  # ARM deployment instance name (used to extract outputs)
+  # -----------------------------------------------
+  DEPLOYMENT_NAME: GH_CICD_${{ github.run_id }}
+
+  # bot credentials deployments rights on resource group
+  # -----------------------------------------------
+  # AZURE_CLIENT_ID: <repo.vars>
+  # AZURE_TENANT_ID: <repo.vars>
+  # AZURE_SUBSCRIPTION_ID: <repo.vars>
+
+  # function app settings
+  # -----------------------------------------------
+  # AZURE_FUNCTIONAPP_RESOURCEGROUP: <repo.vars>
+  # AZURE_RESOURCE_NAME_PREFIX: <repo.vars>
+
+  # variables dynamically set in workflow after running ARM deployment step
+  # -----------------------------------------------
+  # FUNCTION_APP_NAME: <env>
+  # FUNCTION_APP_SLOT_NAME: <env>
+  # AZURE_APPCONFIG_NAME: <env>
+  # FUNCTION_APP_PUB_PROFILE: <env>
+
+# GH permission requests for OpenID token for auth with Azure federated creds
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    if: "!contains(github.event.head_commit.message,'[skip-ci]')"
+    name: Run all tests
+    runs-on: ubuntu-latest
+    steps:
+      ######################################################################
+      # checkout full codebase
+      ######################################################################
+      - name: Checkout repo codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          submodules: false
+
+      ######################################################################
+      # configure Node.js
+      ######################################################################
+      - name: 🔧 Setup Node ${{ env.NODE_VERSION }} environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      ######################################################################
+      # restore cached dependencies
+      ######################################################################
+      - name: ♻️ Restore cached dependencies
+        uses: actions/cache@v3
+        id: node_module_cache
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-${{ env.NODE_VERSION }}-node_modules-${{ hashFiles('package-lock.json') }}
+
+      ######################################################################
+      # install dependencies (if restore cached deps failed)
+      ######################################################################
+      - name: ⬇️ Install dependencies
+        if: steps.node_module_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          pushd './${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}'
+          npm install
+          popd
+
+      ######################################################################
+      # build project
+      ######################################################################
+      - name: 🙏 Build project
+        shell: bash
+        run: |
+          pushd './${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}'
+          npm run build --if-present
+          popd
+
+      ######################################################################
+      # run tests
+      ######################################################################
+      - name: 🧪 Run all tests
+        run: |
+          pushd './${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}'
+          npm run prep --if-present
+          npm test --verbose --passWithNoTests
+          popd
+
+      ######################################################################
+      # save test output
+      ######################################################################
+      - name: 📄 Save code coverage results (report)
+        uses: actions/upload-artifact@v3
+        with:
+          name: COVERAGE_REPORT
+          path: temp/lcov-report
+
+  deploy_infra:
+    if: "!contains(github.event.head_commit.message,'[skip-infra]')"
+    name: Deploy infrastructure
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      ######################################################################
+      # checkout full codebase
+      ######################################################################
+      - name: Checkout repo codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          submodules: false
+
+      ######################################################################
+      # login to Azure CLI via federated credential
+      ######################################################################
+      - name: 🔑 Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      ######################################################################
+      # Provision Azure resources
+      ######################################################################
+      - name: 🚀 Deploy infrastructure
+        run: |
+          az deployment group create --name $DEPLOYMENT_NAME --resource-group $RESOURCE_GROUP --template-file ./infra/main.bicep --parameters deploymentNameId=$DEPLOYMENT_NAME_ID resourceNamePrefix=$RESOURCE_NAME_PREFIX
+        env:
+          DEPLOYMENT_NAME: ${{ env.DEPLOYMENT_NAME }}
+          DEPLOYMENT_NAME_ID: ${{ github.run_id }}
+          RESOURCE_GROUP: ${{ vars.AZURE_FUNCTIONAPP_RESOURCEGROUP }}
+          RESOURCE_NAME_PREFIX: ${{ vars.AZURE_RESOURCE_NAME_PREFIX }}
+
+  deploy_app:
+    if: "!contains(github.event.head_commit.message,'[skip-cd]')"
+    name: Deploy to Azure Function app staging slot
+    runs-on: ubuntu-latest
+    needs: [test,deploy_infra]
+    steps:
+      ######################################################################
+      # checkout full codebase
+      ######################################################################
+      - name: Checkout repo codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          submodules: false
+
+      ######################################################################
+      # configure Node.js
+      ######################################################################
+      - name: 🔧 Setup Node ${{ env.NODE_VERSION }} environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      ######################################################################
+      # restore cached dependencies
+      ######################################################################
+      - name: ♻️ Restore cached dependencies
+        uses: actions/cache@v3
+        id: node_module_cache
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-${{ env.NODE_VERSION }}-node_modules-${{ hashFiles('package-lock.json') }}
+
+      ######################################################################
+      # install dependencies (if restore cached deps failed)
+      ######################################################################
+      - name: ⬇️ Install dependencies
+        if: steps.node_module_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          pushd ./$APP_PACKAGE_PATH
+          npm install
+          popd
+        env:
+          APP_PACKAGE_PATH: ${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}
+
+      ######################################################################
+      # build project
+      ######################################################################
+      - name: 🙏 Build project
+        shell: bash
+        run: |
+          pushd ./$APP_PACKAGE_PATH
+          npm run build --if-present
+          popd
+        env:
+          APP_PACKAGE_PATH: ${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}
+
+      ######################################################################
+      # purge all non-production dependencies
+      ######################################################################
+      - name: 🗑 Purge non-production dependencies
+        shell: bash
+        run: |
+          pushd ./$APP_PACKAGE_PATH
+          npm prune --production
+          popd
+        env:
+          APP_PACKAGE_PATH: ${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}
+
+      ######################################################################
+      # login to Azure CLI via federated credential
+      ######################################################################
+      - name: 🔑 Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      ######################################################################
+      # promote deployment provisioning outputs to workflow variables
+      ######################################################################
+      - name: 🧲 Extract deployment job ouputs to env variables
+        run: |
+          echo "FUNCTION_APP_NAME=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query 'properties.outputs.functionAppName.value' --output tsv)" >> $GITHUB_ENV
+          echo "FUNCTION_APP_SLOT_NAME=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query 'properties.outputs.functionAppSlotName.value' --output tsv)" >> $GITHUB_ENV
+          echo "AZURE_APPCONFIG_NAME=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query 'properties.outputs.appConfigName.value' --output tsv)" >> $GITHUB_ENV
+          echo "AZURE_APPCONFIG_ENDPOINT=$(az deployment group show --name ${{ env.DEPLOYMENT_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --query 'properties.outputs.appConfigEndpoint.value' --output tsv)" >> $GITHUB_ENV
+        env:
+          DEPLOYMENT_NAME: ${{ env.DEPLOYMENT_NAME }}
+          RESOURCE_GROUP: ${{ vars.AZURE_FUNCTIONAPP_RESOURCEGROUP }}
+
+      ######################################################################
+      # acquire publish profile for Azure Functions App
+      ######################################################################
+      - name: ⬇️ Download Azure Function app publishing profile
+        id: az_funcapp_publishing_profile
+        run: |
+          echo "FUNCTION_APP_PUB_PROFILE=$(az functionapp deployment list-publishing-profiles --subscription $AZURE_SUBSCRIPTION_ID --resource-group $FUNCTION_APP_RESOURCE_GROUP --name $FUNCTION_APP_NAME --slot $FUNCTION_APP_SLOT_NAME --xml)" >> $GITHUB_ENV
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          FUNCTION_APP_RESOURCE_GROUP: ${{ vars.AZURE_FUNCTIONAPP_RESOURCEGROUP }}
+          FUNCTION_APP_NAME: ${{ env.FUNCTION_APP_NAME }}
+          FUNCTION_APP_SLOT_NAME: ${{ env.FUNCTION_APP_SLOT_NAME }}
+
+      ######################################################################
+      # deploy function app
+      ######################################################################
+      - name: 🚀 Deploy Azure Functions app
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.FUNCTION_APP_NAME }}
+          package: '.'
+          publish-profile: ${{ env.FUNCTION_APP_PUB_PROFILE }}
+          respect-funcignore: true
+
+      ######################################################################
+      # update app configuration values with version
+      ######################################################################
+      # - name: 📄 Set Azure Application Configuration key "APP_VERSION"
+      #   run: |
+      #     az appconfig kv set --key $APP_CONFIG_KEY_NAME --value $APP_CONFIG_KEY_VALUE --label $APP_CONFIG_KEY_LABEL --endpoint $AZURE_APPCONFIG_ENDPOINT --auth-mode login --yes
+      #   env:
+      #     AZURE_APPCONFIG_ENDPOINT: ${{ env.AZURE_APPCONFIG_ENDPOINT }}
+      #     APP_CONFIG_KEY_NAME: APP_VERSION
+      #     APP_CONFIG_KEY_VALUE: staging
+      #     APP_CONFIG_KEY_LABEL: staging
+
+      ######################################################################
+      # update app configuration value COMMIT_HASH
+      ######################################################################
+      # - name: 📄 Set Azure Application Configuration key "COMMIT_HASH"
+      #   run: |
+      #     az appconfig kv set --key $APP_CONFIG_KEY_NAME --value $APP_CONFIG_KEY_VALUE --label $APP_CONFIG_KEY_LABEL --endpoint $AZURE_APPCONFIG_ENDPOINT --auth-mode login --yes
+      #   env:
+      #     AZURE_APPCONFIG_ENDPOINT: ${{ env.AZURE_APPCONFIG_ENDPOINT }}
+      #     APP_CONFIG_KEY_NAME: COMMIT_HASH
+      #     APP_CONFIG_KEY_VALUE: ${{ github.sha }}
+      #     APP_CONFIG_KEY_LABEL: staging
